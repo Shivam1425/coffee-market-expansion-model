@@ -22,7 +22,7 @@ This project evaluates where a coffee retail brand should scale next by combinin
 
 ## What The Analysis Solves
 
-The SQL file answers four executive questions:
+The SQL file answers five executive questions:
 
 1. Which cities are genuinely expansion-ready once we account for retention, economics, and customer quality?
 2. Which markets look large on population but are still too shallow or too fragile for store capex?
@@ -59,7 +59,7 @@ The project is organized as a reusable MySQL 8 analysis package using declarativ
 - **Time-to-Second-Purchase (T2SP):** Cohort tracking for behavioral retention windows
 - **Market Basket Attachment Rate:** Quantifying the exact pull of "hero" items on secondary SKUs
 - **Lifetime Value (CLTV) Deciles:** Statistical bucketing to prove the Pareto distribution
-- **Executive scorecard:** Final weighted expansion model with recommended action labels
+- **Executive scorecard:** Default weighted expansion model with recommended action labels, plus BI-ready percentile diagnostics
 
 ## Strategic Recommendation
 

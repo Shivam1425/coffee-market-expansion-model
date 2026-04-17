@@ -19,6 +19,18 @@ SELECT COUNT(*) AS null_revenue_rows
 FROM sales
 WHERE total IS NULL;
 
+-- Q0.3: Price Integrity Check (transaction total vs product list price)
+SELECT COUNT(*) AS price_mismatch_rows
+FROM sales s
+JOIN products p
+  ON s.product_id = p.product_id
+WHERE ABS(s.total - p.price) > 0.01;
+
+-- Q0.4: Missing Ratings Check
+SELECT COUNT(*) AS null_rating_rows
+FROM sales
+WHERE rating IS NULL;
+
 
 /* =========================================================
 STAGING LAYER: DECLARATIVE VIEWS
@@ -77,11 +89,14 @@ WITH max_date AS (
 ),
 city_sales AS (
     SELECT 
-        city_id,
-        SUM(CASE WHEN sale_date BETWEEN DATE_SUB((SELECT md FROM max_date), INTERVAL 3 MONTH) AND (SELECT md FROM max_date) THEN total ELSE 0 END) AS recent_3m_revenue,
-        SUM(CASE WHEN sale_date BETWEEN DATE_SUB((SELECT md FROM max_date), INTERVAL 6 MONTH) AND DATE_SUB((SELECT md FROM max_date), INTERVAL 3 MONTH) THEN total ELSE 0 END) AS prior_3m_revenue
-    FROM vw_sales_enriched
-    GROUP BY city_id
+        s.city_id,
+        -- Recent window is inclusive of boundary date.
+        SUM(CASE WHEN s.sale_date >= DATE_SUB(m.md, INTERVAL 3 MONTH) AND s.sale_date <= m.md THEN s.total ELSE 0 END) AS recent_3m_revenue,
+        -- Prior window is half-open to avoid overlap with recent window.
+        SUM(CASE WHEN s.sale_date >= DATE_SUB(m.md, INTERVAL 6 MONTH) AND s.sale_date < DATE_SUB(m.md, INTERVAL 3 MONTH) THEN s.total ELSE 0 END) AS prior_3m_revenue
+    FROM vw_sales_enriched s
+    CROSS JOIN max_date m
+    GROUP BY s.city_id
 )
 SELECT 
     city_id, 
@@ -136,7 +151,8 @@ scored AS (
     SELECT 
         customer_id, 
         city_id,
-        NTILE(5) OVER(ORDER BY recency DESC) AS r_score,
+        -- Lower recency (more recent buyer) should get a higher score.
+        6 - NTILE(5) OVER(ORDER BY recency ASC) AS r_score,
         NTILE(5) OVER(ORDER BY frequency ASC) AS f_score,
         NTILE(5) OVER(ORDER BY monetary ASC) AS m_score
     FROM customer_rfm
@@ -214,20 +230,56 @@ ORDER BY city_name, sku_rank;
 /* =========================================================
 SECTION 8: MARKET BASKET AFFINITY
 ========================================================= */
--- Q8. Which product pairs are most frequently purchased together across all transactions?
-WITH basket_pairs AS (
+-- Q8. Which product pairs are most frequently purchased together in same-customer, same-day baskets?
+WITH basket_items AS (
+    SELECT DISTINCT
+        customer_id,
+        sale_date,
+        product_id,
+        product_name,
+        CONCAT(customer_id, '|', DATE_FORMAT(sale_date, '%Y-%m-%d')) AS basket_id
+    FROM vw_sales_enriched
+),
+basket_totals AS (
+    SELECT COUNT(DISTINCT basket_id) AS total_baskets
+    FROM basket_items
+),
+product_basket_counts AS (
+    SELECT
+        product_name,
+        COUNT(DISTINCT basket_id) AS product_baskets
+    FROM basket_items
+    GROUP BY product_name
+),
+basket_pairs AS (
     SELECT 
-        a.product_name AS product_1, 
-        b.product_name AS product_2, 
-        COUNT(DISTINCT a.sale_id) AS times_bought_together
-    FROM vw_sales_enriched a
-    JOIN vw_sales_enriched b 
-      ON a.sale_id = b.sale_id 
+        a.product_name AS product_1,
+        b.product_name AS product_2,
+        COUNT(DISTINCT a.basket_id) AS baskets_bought_together
+    FROM basket_items a
+    JOIN basket_items b
+      ON a.basket_id = b.basket_id
      AND a.product_id < b.product_id
     GROUP BY a.product_name, b.product_name
 )
-SELECT * FROM basket_pairs 
-ORDER BY times_bought_together DESC 
+SELECT
+    bp.product_1,
+    bp.product_2,
+    bp.baskets_bought_together,
+    ROUND(100.0 * bp.baskets_bought_together / bt.total_baskets, 4) AS support_pct,
+    ROUND(100.0 * bp.baskets_bought_together / p1.product_baskets, 2) AS confidence_p1_to_p2_pct,
+    ROUND(
+        (1.0 * bp.baskets_bought_together / p1.product_baskets) /
+        NULLIF(1.0 * p2.product_baskets / bt.total_baskets, 0),
+        4
+    ) AS lift
+FROM basket_pairs bp
+CROSS JOIN basket_totals bt
+JOIN product_basket_counts p1
+  ON bp.product_1 = p1.product_name
+JOIN product_basket_counts p2
+  ON bp.product_2 = p2.product_name
+ORDER BY lift DESC, bp.baskets_bought_together DESC
 LIMIT 20;
 
 
@@ -246,78 +298,7 @@ ORDER BY population DESC;
 
 -- Insight: Large population centers with low current penetration represent prime digital-first whitespace before fixed capex.
 
-
-/* =========================================================
-SECTION 13: EXECUTIVE EXPANSION SCORECARD
-Outputs the raw normalized scores (Percentiles) so the business
-can dynamically weight demand, retention, economics, and risk 
-in a BI environment.
-========================================================= */
--- Q13. What is the final, normalized expansion scorecard ranking cities by weighted potential and risk?
-WITH base_scores AS (
-    SELECT
-        cb.city_id,
-        cb.city_name,
-        cb.total_revenue,
-        cb.total_customers,
-        cb.avg_order_value,
-        cb.revenue_per_customer,
-        cb.revenue_to_rent_ratio,
-        cb.avg_rating,
-        cb.customers_per_100k_residents,
-        COALESCE(cr.m1_retention_pct, 0) AS m1_retention_pct,
-        COALESCE(rfm.champion_pct, 0) AS champion_pct,
-        COALESCE(rfm.at_risk_pct, 0) AS at_risk_pct,
-        COALESCE(cc.top_10pct_customer_revenue_share, 100) AS top_10pct_customer_revenue_share,
-        COALESCE(cm.recent_vs_prior_3m_revenue_pct, -100) AS recent_vs_prior_3m_revenue_pct,
-        COALESCE(cp.premium_mix_pct, 0) AS premium_mix_pct,
-        cb.population,
-        ROUND(PERCENT_RANK() OVER (ORDER BY cb.total_revenue) * 100, 2) AS total_revenue_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY cb.revenue_to_rent_ratio) * 100, 2) AS revenue_to_rent_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cr.m1_retention_pct, 0)) * 100, 2) AS retention_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(rfm.champion_pct, 0)) * 100, 2) AS champion_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY cb.avg_rating) * 100, 2) AS rating_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY cb.population) * 100, 2) AS population_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cm.recent_vs_prior_3m_revenue_pct, -100)) * 100, 2) AS momentum_score,
-        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cp.premium_mix_pct, 0)) * 100, 2) AS premium_score,
-        ROUND((1 - PERCENT_RANK() OVER (ORDER BY COALESCE(cc.top_10pct_customer_revenue_share, 100))) * 100, 2) AS concentration_score,
-        ROUND((1 - PERCENT_RANK() OVER (ORDER BY COALESCE(rfm.at_risk_pct, 100))) * 100, 2) AS risk_score
-    FROM vw_city_baseline cb
-    LEFT JOIN vw_city_retention cr
-        ON cb.city_id = cr.city_id
-    LEFT JOIN vw_city_rfm_mix rfm
-        ON cb.city_id = rfm.city_id
-    LEFT JOIN vw_city_concentration cc
-        ON cb.city_id = cc.city_id
-    LEFT JOIN vw_city_momentum cm
-        ON cb.city_id = cm.city_id
-    LEFT JOIN vw_city_portfolio cp
-        ON cb.city_id = cp.city_id
-)
-SELECT
-    city_name,
-    total_revenue,
-    revenue_to_rent_ratio,
-    m1_retention_pct,
-    recent_vs_prior_3m_revenue_pct,
-    -- Outputting raw percentile scores for BI parameterization instead of hardcoded SQL weights
-    total_revenue_score,
-    revenue_to_rent_score,
-    retention_score,
-    champion_score,
-    momentum_score,
-    concentration_score,
-    risk_score,
-    -- Simple baseline average of scores for quick sorting
-    ROUND((total_revenue_score + revenue_to_rent_score + retention_score + champion_score + momentum_score + concentration_score) / 6.0, 2) AS unweighted_baseline_score
-FROM base_scores
-ORDER BY unweighted_baseline_score DESC;
-
--- Insight: Chennai, Pune, and Bangalore consistently rank in the top quartile across multiple unweighted dimensions.
--- Recommendation: Export these percentiles into a BI tool where stakeholders can adjust the weights dynamically (e.g., heavily weighting retention vs. scale).
-
-
-/* =========================================================
+/* =======================================================
 SECTION 10: TIME-TO-SECOND-PURCHASE (T2SP)
 ========================================================= */
 -- Q10. For repeat customers, how many days does it take to make their second purchase?
@@ -363,34 +344,55 @@ ORDER BY t2sp_bucket;
 /* =========================================================
 SECTION 11: MARKET BASKET ATTACHMENT RATE
 ========================================================= */
--- Q11. When a customer buys a "hero" item, what percentage of the time do they attach a secondary item?
+-- Q11. When a customer buys a "hero" item in a basket (same customer, same day),
+--      what percentage of the time do they attach a secondary item?
 CREATE OR REPLACE VIEW vw_attachment_rate AS
-WITH basket_totals AS (
-    SELECT product_name, COUNT(DISTINCT sale_id) as total_sales
+WITH basket_items AS (
+    SELECT DISTINCT
+        customer_id,
+        sale_date,
+        product_id,
+        product_name,
+        CONCAT(customer_id, '|', DATE_FORMAT(sale_date, '%Y-%m-%d')) AS basket_id
     FROM vw_sales_enriched
-    GROUP BY product_name
+),
+hero_products AS (
+    SELECT
+        product_name,
+        primary_product_total_baskets,
+        DENSE_RANK() OVER (ORDER BY primary_product_total_baskets DESC) AS hero_rank
+    FROM (
+        SELECT
+            product_name,
+            COUNT(DISTINCT basket_id) AS primary_product_total_baskets
+        FROM basket_items
+        GROUP BY product_name
+    ) product_counts
 ),
 basket_pairs AS (
-    SELECT 
-        a.product_name AS primary_product, 
-        b.product_name AS secondary_product, 
-        COUNT(DISTINCT a.sale_id) AS times_bought_together
-    FROM vw_sales_enriched a
-    JOIN vw_sales_enriched b 
-      ON a.sale_id = b.sale_id 
-     AND a.product_id != b.product_id
+    SELECT
+        a.product_name AS primary_product,
+        b.product_name AS secondary_product,
+        COUNT(DISTINCT a.basket_id) AS baskets_bought_together
+    FROM basket_items a
+    JOIN basket_items b
+      ON a.basket_id = b.basket_id
+     AND a.product_id <> b.product_id
     GROUP BY a.product_name, b.product_name
 )
-SELECT 
+SELECT
+    hp.hero_rank,
     bp.primary_product,
     bp.secondary_product,
-    bp.times_bought_together,
-    bt.total_sales AS primary_product_total_sales,
-    ROUND(100.0 * bp.times_bought_together / bt.total_sales, 2) AS attachment_rate_pct
+    bp.baskets_bought_together,
+    hp.primary_product_total_baskets,
+    ROUND(100.0 * bp.baskets_bought_together / hp.primary_product_total_baskets, 2) AS attachment_rate_pct
 FROM basket_pairs bp
-JOIN basket_totals bt ON bp.primary_product = bt.product_name
-ORDER BY bt.total_sales DESC, attachment_rate_pct DESC
-LIMIT 20;
+JOIN hero_products hp
+  ON bp.primary_product = hp.product_name
+WHERE hp.hero_rank <= 5
+ORDER BY hp.hero_rank, attachment_rate_pct DESC, bp.baskets_bought_together DESC
+LIMIT 30;
 
 -- Insight: Attachment rate is more actionable than raw co-occurrence. It tells us exactly how effective a primary product is at driving sales for a secondary product.
 
@@ -429,6 +431,104 @@ GROUP BY cltv_decile
 ORDER BY cltv_decile ASC;
 
 -- Insight: Highlights how heavily skewed customer value is. The top 10% (Decile 1) often generates vastly more revenue than the bottom 50% combined.
+
+/* =========================================================
+SECTION 13: EXECUTIVE EXPANSION SCORECARD
+Outputs normalized percentile diagnostics plus a default weighted
+score and action labels for decision-ready prioritization.
+========================================================= */
+-- Q13. What is the final, normalized expansion scorecard ranking cities by weighted potential and risk?
+WITH base_scores AS (
+    SELECT
+        cb.city_id,
+        cb.city_name,
+        cb.total_revenue,
+        cb.total_customers,
+        cb.avg_order_value,
+        cb.revenue_per_customer,
+        cb.revenue_to_rent_ratio,
+        cb.avg_rating,
+        cb.customers_per_100k_residents,
+        COALESCE(cr.m1_retention_pct, 0) AS m1_retention_pct,
+        COALESCE(rfm.champion_pct, 0) AS champion_pct,
+        COALESCE(rfm.at_risk_pct, 0) AS at_risk_pct,
+        COALESCE(cc.top_10pct_customer_revenue_share, 100) AS top_10pct_customer_revenue_share,
+        COALESCE(cm.recent_vs_prior_3m_revenue_pct, -100) AS recent_vs_prior_3m_revenue_pct,
+        COALESCE(cp.premium_mix_pct, 0) AS premium_mix_pct,
+        cb.population,
+        ROUND(PERCENT_RANK() OVER (ORDER BY cb.total_revenue) * 100, 2) AS total_revenue_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY cb.revenue_to_rent_ratio) * 100, 2) AS revenue_to_rent_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cr.m1_retention_pct, 0)) * 100, 2) AS retention_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(rfm.champion_pct, 0)) * 100, 2) AS champion_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY cb.avg_rating) * 100, 2) AS rating_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY cb.population) * 100, 2) AS population_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cm.recent_vs_prior_3m_revenue_pct, -100)) * 100, 2) AS momentum_score,
+        ROUND(PERCENT_RANK() OVER (ORDER BY COALESCE(cp.premium_mix_pct, 0)) * 100, 2) AS premium_score,
+        ROUND((1 - PERCENT_RANK() OVER (ORDER BY COALESCE(cc.top_10pct_customer_revenue_share, 100))) * 100, 2) AS concentration_score,
+        ROUND((1 - PERCENT_RANK() OVER (ORDER BY COALESCE(rfm.at_risk_pct, 100))) * 100, 2) AS risk_score
+    FROM vw_city_baseline cb
+    LEFT JOIN vw_city_retention cr
+        ON cb.city_id = cr.city_id
+    LEFT JOIN vw_city_rfm_mix rfm
+        ON cb.city_id = rfm.city_id
+    LEFT JOIN vw_city_concentration cc
+        ON cb.city_id = cc.city_id
+    LEFT JOIN vw_city_momentum cm
+        ON cb.city_id = cm.city_id
+    LEFT JOIN vw_city_portfolio cp
+        ON cb.city_id = cp.city_id
+),
+final_scores AS (
+    SELECT
+        bs.*,
+        -- Baseline "all-equal" score for quick diagnostics.
+        ROUND((total_revenue_score + revenue_to_rent_score + retention_score + champion_score + momentum_score + concentration_score) / 6.0, 2) AS unweighted_baseline_score,
+        -- Default strategic weighting; stakeholders can tune this in BI.
+        ROUND(
+            0.25 * total_revenue_score +
+            0.20 * revenue_to_rent_score +
+            0.20 * retention_score +
+            0.15 * champion_score +
+            0.10 * momentum_score +
+            0.10 * concentration_score,
+            2
+        ) AS weighted_expansion_score
+    FROM base_scores bs
+)
+SELECT
+    city_name,
+    total_revenue,
+    revenue_to_rent_ratio,
+    m1_retention_pct,
+    recent_vs_prior_3m_revenue_pct,
+    -- Percentile diagnostics (export-ready for BI reweighting)
+    total_revenue_score,
+    revenue_to_rent_score,
+    retention_score,
+    champion_score,
+    momentum_score,
+    concentration_score,
+    risk_score,
+    unweighted_baseline_score,
+    weighted_expansion_score,
+    CASE
+        WHEN weighted_expansion_score >= 75
+             AND m1_retention_pct >= 50
+             AND recent_vs_prior_3m_revenue_pct >= 0
+            THEN 'Scale Now'
+        WHEN weighted_expansion_score >= 65
+             AND m1_retention_pct >= 45
+            THEN 'Defend & Deepen'
+        WHEN population_score >= 70
+             AND customers_per_100k_residents < 0.50
+            THEN 'Digital-First Build'
+        ELSE 'Fix Before Investing'
+    END AS expansion_decision
+FROM final_scores
+ORDER BY weighted_expansion_score DESC, unweighted_baseline_score DESC;
+
+-- Insight: Use weighted score for default prioritization, but retain raw percentiles
+-- so leadership can scenario-test aggressive growth vs. retention-first strategies.
 
 
 /* ======================================================
