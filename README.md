@@ -2,104 +2,46 @@
 
 **Author:** Shivam Kumar  
 **SQL Dialect:** MySQL 8.0+  
-**Project Type:** Advanced retail expansion analysis
 
-## Executive Summary
+## Overview
 
-This project evaluates where a coffee retail brand should scale next by combining demand, retention, customer quality, unit economics, portfolio mix, whitespace potential, and concentration risk. Instead of ranking markets on revenue alone, the SQL package builds a city-by-city decision engine that separates markets to **scale now**, **defend and deepen**, **develop digitally first**, or **fix before investing**.
+This project analyzes the sales performance of a coffee retail brand across 14 cities to determine the optimal strategy for market expansion. Rather than simply ranking cities by total revenue, I built a SQL-based decision engine that evaluates multiple dimensions: retention rates, unit economics (revenue-to-rent ratio), customer quality (RFM segmentation), and whitespace potential (population vs. penetration). 
 
-## Dataset Snapshot
+The goal was to mathematically separate markets into four strategic tiers: **scale now**, **defend and deepen**, **develop digitally first**, or **fix before investing**.
 
-- Date range: `2023-01-01` to `2024-10-01`
-- Cities: `14`
-- Customers: `497`
-- Products: `28`
-- Sales rows: `10,388`
-- Total revenue: `6.07M`
-- Average order value: `584.35`
-- Average rating: `3.99`
-- Data quality status: `0` duplicate sale IDs, `0` price mismatches, `0` missing ratings
+## The Data
+- **Timeframe:** Jan 2023 - Oct 2024
+- **Scale:** 14 Cities, 10,388 transactions, 497 unique customers
+- **Total Revenue Analyzed:** 6.07M
 
-## What The Analysis Solves
+## Key Analytical Findings
 
-The SQL file answers five executive questions:
+1. **Chennai is the most balanced expansion market.** It leads the final expansion score with strong revenue (`944k`), high M1 retention (`66.67%`), the best average rating (`4.52`), and a very strong champion-customer mix.
+2. **Pune is the monetization leader, but it is cooling.** It delivers the highest revenue (`1.26M`), best rent efficiency (`82.24x` revenue-to-rent), and strongest M1 retention (`80.77%`), but recent 3-month revenue is down `22.42%` versus the prior 3 months.
+3. **Mumbai and Delhi are whitespace markets, not immediate store bets.** Their addressable population is huge, but current customer penetration is still shallow. They are better suited to digital-first demand building before an aggressive fixed-cost rollout.
+4. **The Pareto principle is alive and well.** The top 10% of customers (Decile 1) generate a vastly disproportionate share of lifetime revenue.
+5. **The critical retention window is highly specific.** Time-to-Second-Purchase (T2SP) analysis shows exactly when first-time buyers are most likely to return, providing a precise timeline for automated lifecycle marketing.
 
-1. Which cities are genuinely expansion-ready once we account for retention, economics, and customer quality?
-2. Which markets look large on population but are still too shallow or too fragile for store capex?
-3. Which products and portfolio mixes should anchor new-city launches?
-4. Where is the business overexposed to narrow customer groups or softening momentum?
-5. What is the optimal Time-to-Second-Purchase (T2SP) window, and how skewed is the Customer Lifetime Value (CLTV) distribution?
+## SQL Techniques Used
 
-## Headline Findings
+- **CTEs & Declarative Views:** Used `CREATE OR REPLACE VIEW` to build a clean, modular semantic layer instead of relying on messy temporary tables.
+- **Window Functions:** Heavy use of `ROW_NUMBER()`, `DENSE_RANK()`, `NTILE()`, and `PERCENT_RANK()` for cohort analysis and RFM deciling.
+- **Cross Joins & Self Joins:** Executed market basket analysis to calculate Support, Confidence, and Lift for product pairs.
 
-- **Chennai is the most balanced expansion market.** It leads the final expansion score with strong revenue (`944k`), high M1 retention (`66.67%`), the best average rating (`4.52`), and a very strong champion-customer mix.
-- **Pune is the monetization leader, but it is cooling.** It delivers the highest revenue (`1.26M`), best rent efficiency (`82.24x` revenue-to-rent), and strongest M1 retention (`80.77%`), but recent 3-month revenue is down `22.42%` versus the prior 3 months.
-- **Bangalore is the cleanest scale-now profile.** It combines `860k` revenue, a `66.67%` champion share, premium-friendly demand, and positive recent momentum (`+10.35%`).
-- **Mumbai and Delhi are whitespace markets, not immediate store bets.** Their addressable population is huge, but current customer penetration is still shallow, so they are better suited to digital-first demand building before aggressive fixed-cost rollout.
-- **The business is decisively coffee-led.** Core coffee contributes `56.87%` of total revenue, followed by merch and gifts (`20.82%`). Cold Brew Coffee Pack is the top SKU overall at `1.19M`.
-- **Hero products are stable, but organic bundling is weak.** Cold Brew Coffee Pack and Coffee Beans dominate city-level product rankings, yet most same-day basket pairs show low support and lift below `1.0`. Bundles should be designed and tested, not assumed.
-- **The Pareto principle is alive and well.** The top 10% of customers (Decile 1) generate a vastly disproportionate share of lifetime revenue, making targeted VIP retention far more lucrative than blanket discounting.
-- **The critical retention window is highly specific.** Time-to-Second-Purchase (T2SP) analysis shows exactly when first-time buyers are most likely to return, providing a precise timeline for automated lifecycle marketing.
+## Engineering & Performance Optimization Notes
 
-## Analytical Framework In `analysis.sql`
+While writing this analysis, I made specific design choices to balance analytical depth with database performance:
 
-The project is organized as a reusable MySQL 8 analysis package using declarative views (`CREATE OR REPLACE VIEW`):
+*   **Dynamic Views vs. Materialized Tables:** In this repository, the analysis relies heavily on `CREATE OR REPLACE VIEW`. While this is great for keeping the code modular, views like `vw_city_momentum` and `vw_city_rfm_mix` recalculate complex aggregations and Window Functions on the fly. In a real-world production environment with millions of rows, I would use an ETL tool (like `dbt`) to materialize these views into physical tables on a nightly schedule to avoid crushing the database compute resources.
+*   **Indexing Strategy:** To ensure the self-joins required for the Market Basket Affinity (Section 8) run efficiently, the `schema.sql` file includes composite indexes on `(customer_id, sale_date, product_id)`. Without these indexes, the `CROSS JOIN` operations would result in full table scans and exponential query times.
 
-- **Staging layer:** Clean, enriched views for sales, customer metrics, and city-month metrics
-- **Data governance scorecard:** Duplicate, mismatch, and completeness checks
-- **City operating benchmark:** Revenue, AOV, customer productivity, rating, penetration, and rent efficiency
-- **Momentum diagnostics:** Recent 3-month vs prior 3-month revenue and customer movement
-- **Cohort retention:** M1, M2, and M3 retention by city
-- **RFM customer quality:** Champion, loyal, developing, and at-risk high-value mix by market
-- **Revenue concentration risk:** Dependence on top 10% and 20% of customers
-- **Portfolio mix:** Core coffee, premiumization, subscription, merch, and equipment mix
-- **Hero SKU ranking:** Top products by city for launch assortment planning
-- **Market basket affinity:** Support, confidence, and lift using same-customer same-day baskets
-- **Whitespace scan:** High-population, low-penetration markets for digital-first development
-- **Time-to-Second-Purchase (T2SP):** Cohort tracking for behavioral retention windows
-- **Market Basket Attachment Rate:** Quantifying the exact pull of "hero" items on secondary SKUs
-- **Lifetime Value (CLTV) Deciles:** Statistical bucketing to prove the Pareto distribution
-- **Executive scorecard:** Default weighted expansion model with recommended action labels, plus BI-ready percentile diagnostics
+## BI Dashboard Integration (Semantic Layer)
 
-## Strategic Recommendation
+This SQL script is designed to act as the **Semantic Layer** for a BI tool like Power BI or Tableau. 
+Instead of forcing Power BI to perform complex DAX calculations for RFM segmentation or Cohort Retention, the heavy lifting is done in the database. The final view, `vw_city_baseline`, acts as a pre-aggregated Fact Table that can be imported directly into Power BI, ensuring the dashboard loads instantly and the business logic remains version-controlled in SQL.
 
-The current data supports a three-tier expansion view:
+## How to Run
 
-- **Scale now:** `Bangalore`
-- **Scale, but arrest softening:** `Chennai`, `Pune`
-- **Digital-first whitespace build:** `Mumbai`, `Delhi`
-- **Fix retention before capex:** weaker repeat markets such as `Surat`, `Indore`, `Nagpur`, and similar low-stickiness cities
-
-The practical rollout implication is simple: use Chennai and Bangalore as the operating blueprint, protect Pune before momentum weakens further, and treat Mumbai and Delhi as funnel-development markets until penetration and unit economics improve.
-
-## Sample Output: City Expansion Scorecard
-
-| city_name | total_revenue | m1_retention_pct | revenue_to_rent_ratio | expansion_decision |
-|-----------|---------------|------------------|-----------------------|--------------------|
-| Chennai   | 944,000       | 66.67%           | 45.2x                 | Scale Now          |
-| Pune      | 1,260,000     | 80.77%           | 82.2x                 | Defend & Deepen    |
-
-## Files
-
-- `analysis.sql` - Advanced MySQL 8 analytical workflow
-- `schema.sql` - MySQL 8 schema and indexing strategy
-- `data/` - Source CSV files
-- `assets/` - ERD and schema visuals
-
-## SQL Skills Demonstrated
-
-- CTE pipelines
-- Declarative Views (`CREATE OR REPLACE VIEW`)
-- Window functions: `ROW_NUMBER()`, `DENSE_RANK()`, `NTILE()`, `PERCENT_RANK()`
-- Cohort and retention analysis
-- RFM segmentation
-- Concentration and portfolio diagnostics
-- Composite market scoring
-- Decision-ready business commentary in SQL
-
-## How To Use
-
-1. Create the schema from `schema.sql` in MySQL 8.0+.
-2. Load the CSV files into the matching tables.
-3. Run `analysis.sql` top to bottom. It uses declarative views, so downstream queries can reference upstream logic dynamically.
-4. Use the final executive scorecard as the presentation-ready market recommendation output.
+1. Execute `schema.sql` in MySQL 8.0+ to build the tables and indexes.
+2. Load the source CSV files from the `data/` folder into the tables.
+3. Run `analysis.sql` from top to bottom.
