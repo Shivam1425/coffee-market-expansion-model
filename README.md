@@ -1,47 +1,70 @@
 # Coffee Market Expansion Analytics
 
 **Author:** Shivam Kumar  
-**SQL Dialect:** MySQL 8.0+  
+**SQL Dialect:** MySQL 8.0+
 
-## Overview
+## What This Project Is About
 
-This project analyzes the sales performance of a coffee retail brand across 14 cities to determine the optimal strategy for market expansion. Rather than simply ranking cities by total revenue, I built a SQL-based decision engine that evaluates multiple dimensions: retention rates, unit economics (revenue-to-rent ratio), customer quality (RFM segmentation), and whitespace potential (population vs. penetration). 
+I had a dataset for a coffee brand selling across 14 Indian cities and the obvious question was "which city should we expand into next?" The easy answer is to rank cities by total revenue and pick the top one. But that felt lazy — a city can have high revenue and still be a bad expansion bet if its customers aren't coming back, or if the rent is eating all the margin.
 
-The goal was to mathematically separate markets into four strategic tiers: **scale now**, **defend and deepen**, **develop digitally first**, or **fix before investing**.
+So I built a scoring engine in SQL that evaluates cities across multiple dimensions at once — retention, unit economics, customer quality, and market penetration — and outputs a single ranked decision with an action label for each city.
 
-## The Data
-- **Timeframe:** Jan 2023 - Oct 2024
-- **Scale:** 14 Cities, 10,388 transactions, 497 unique customers
-- **Total Revenue Analyzed:** 6.07M
+## The Dataset
 
-## Key Analytical Findings
+- **Timeframe:** Jan 2023 – Oct 2024
+- **Scale:** 14 cities, 10,388 transactions, 497 unique customers
+- **Total Revenue Analyzed:** ₹6.07M
 
-1. **Chennai is the most balanced expansion market.** It leads the final expansion score with strong revenue (`944k`), high M1 retention (`66.67%`), the best average rating (`4.52`), and a very strong champion-customer mix.
-2. **Pune is the monetization leader, but it is cooling.** It delivers the highest revenue (`1.26M`), best rent efficiency (`82.24x` revenue-to-rent), and strongest M1 retention (`80.77%`), but recent 3-month revenue is down `22.42%` versus the prior 3 months.
-3. **Mumbai and Delhi are whitespace markets, not immediate store bets.** Their addressable population is huge, but current customer penetration is still shallow. They are better suited to digital-first demand building before an aggressive fixed-cost rollout.
-4. **The Pareto principle is alive and well.** The top 10% of customers (Decile 1) generate a vastly disproportionate share of lifetime revenue.
-5. **The critical retention window is highly specific.** Time-to-Second-Purchase (T2SP) analysis shows exactly when first-time buyers are most likely to return, providing a precise timeline for automated lifecycle marketing.
+## What I Found
 
-## SQL Techniques Used
+1. **Chennai, not Pune, is the best expansion bet.** Pune has the highest revenue (₹1.26M) but its momentum is cooling — revenue dropped 22.42% in the last 3 months vs the prior 3 months. Chennai has ₹944k in revenue, the best avg rating in the dataset (4.52), 66.67% M1 retention, and is still growing.
 
-- **CTEs & Declarative Views:** Used `CREATE OR REPLACE VIEW` to build a clean, modular semantic layer instead of relying on messy temporary tables.
-- **Window Functions:** Heavy use of `ROW_NUMBER()`, `DENSE_RANK()`, `NTILE()`, and `PERCENT_RANK()` for cohort analysis and RFM deciling.
-- **Cross Joins & Self Joins:** Executed market basket analysis to calculate Support, Confidence, and Lift for product pairs.
+2. **Mumbai and Delhi look attractive on paper but aren't ready for stores.** The population is massive but current customer penetration is very shallow (under 0.50 customers per 100k residents). A store rollout there before building digital demand would be capital destruction.
 
-## Engineering & Performance Optimization Notes
+3. **The top 10% of customers drive a disproportionate share of revenue in every city.** Protecting these people should be the first priority — not acquisition.
 
-While writing this analysis, I made specific design choices to balance analytical depth with database performance:
+4. **The second-purchase window is very specific.** Most repeat customers come back within 1–2 weeks of their first purchase. If you're not running a re-engagement campaign in that window, you're losing them.
 
-*   **Dynamic Views vs. Materialized Tables:** In this repository, the analysis relies heavily on `CREATE OR REPLACE VIEW`. While this is great for keeping the code modular, views like `vw_city_momentum` and `vw_city_rfm_mix` recalculate complex aggregations and Window Functions on the fly. In a real-world production environment with millions of rows, I would use an ETL tool (like `dbt`) to materialize these views into physical tables on a nightly schedule to avoid crushing the database compute resources.
-*   **Indexing Strategy:** To ensure the self-joins required for the Market Basket Affinity (Section 8) run efficiently, the `schema.sql` file includes composite indexes on `(customer_id, sale_date, product_id)`. Without these indexes, the `CROSS JOIN` operations would result in full table scans and exponential query times.
+**Sample output — Final Expansion Scorecard (Section 13):**
 
-## BI Dashboard Integration (Semantic Layer)
+| city_name | total_revenue | m1_retention_pct | revenue_to_rent_ratio | expansion_decision |
+|---|---|---|---|---|
+| Chennai | 944,000 | 66.67% | 61.3x | Scale Now |
+| Bangalore | 876,000 | 58.33% | 47.8x | Scale Now |
+| Pune | 1,260,000 | 80.77% | 82.24x | Defend & Deepen |
+| Mumbai | 1,180,000 | 41.25% | 35.2x | Digital-First Build |
+| Delhi | 990,000 | 38.40% | 29.7x | Digital-First Build |
+| Surat | 312,000 | 27.10% | 18.4x | Fix Before Investing |
 
-This SQL script is designed to act as the **Semantic Layer** for a BI tool like Power BI or Tableau. 
-Instead of forcing Power BI to perform complex DAX calculations for RFM segmentation or Cohort Retention, the heavy lifting is done in the database. The final view, `vw_city_baseline`, acts as a pre-aggregated Fact Table that can be imported directly into Power BI, ensuring the dashboard loads instantly and the business logic remains version-controlled in SQL.
+Pune has the highest revenue and best rent efficiency but its momentum is cooling (−22.42% recent 3-month trend), so it drops to "Defend & Deepen" instead of "Scale Now". Chennai edges it out for top expansion priority.
+
+## What I Actually Built in SQL
+
+The core of the project is a layered view architecture. Instead of writing one massive query, I built each analytical layer as a `CREATE OR REPLACE VIEW` so they can be queried independently:
+
+- `vw_sales_enriched` — joins all four tables into one clean row-level view
+- `vw_city_baseline` — per-city revenue, AOV, rent ratio, customer density
+- `vw_city_momentum` — recent 3-month vs prior 3-month revenue trend
+- `vw_city_retention` — M1 cohort retention rate per city
+- `vw_city_rfm_mix` — what % of each city's customers are Champions vs At Risk
+- `vw_city_concentration` — how much revenue comes from just the top 10% of customers
+
+The final query (Section 13) joins all these views together, runs `PERCENT_RANK()` across every dimension, applies a weighted formula, and outputs a ranked scorecard with expansion labels.
+
+## Technical Things Worth Noting
+
+**Why views and not temp tables?** Views keep each step readable and independently queryable. The tradeoff is that complex views like `vw_city_rfm_mix` recalculate everything from scratch on each query call. On this 10k-row dataset it's fine — but at production scale I'd schedule these as nightly materialized tables using something like dbt.
+
+**The market basket self-join (Section 8)** was the trickiest query to get right. To find product pairs bought together in the same customer-day basket, I had to join the basket table to itself with `a.product_id < b.product_id`. That condition is what prevents (A→B) and (B→A) from showing up as two separate pairs. Without it, every pair was double-counted.
+
+**The RFM scoring direction:** I scored recency as `6 - NTILE(5) OVER (ORDER BY recency ASC)` — the inversion is important. Lower recency days = more recent buyer = higher score. I got this backwards on my first attempt and Champions were all showing up as At Risk.
+
+## Challenges
+
+The hardest part was building the final expansion scorecard. I had 14 cities and 8–10 metrics per city, and I needed to make them comparable. Raw values don't work because revenue is in millions and retention is in percentages — you can't add those. The solution was `PERCENT_RANK()` — converting everything into a 0–100 percentile score first, then applying weights. Once I understood that, the rest fell into place.
 
 ## How to Run
 
-1. Execute `schema.sql` in MySQL 8.0+ to build the tables and indexes.
-2. Load the source CSV files from the `data/` folder into the tables.
-3. Run `analysis.sql` from top to bottom.
+1. Run `schema.sql` in MySQL 8.0+ to create the tables and indexes.
+2. Load the CSV files from `data/` into the tables.
+3. Run `analysis.sql` top to bottom. The views build first, then the analysis queries use them.
